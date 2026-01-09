@@ -7,7 +7,7 @@ PluginInfo = {
   Id = "IiyamaDisplay",
   Description = "Control for Iiyama Displays via TCP or RS232",
   ShowDebug = true,
-  Author = "Tomasz Gąsiorowski"
+  Author = "AGTOM sp. z o.o."
 }
 
 -- Define Colors
@@ -96,7 +96,7 @@ function GetControlLayout(props)
     table.insert(graphics, { Type = "GroupBox", Text = "Plugin Information", Position = {5, y}, Size = {300, 100}, HTextAlign = "Left" })
     table.insert(graphics, { Type = "Label", Text = PluginInfo.Name, Position = {15, y+20}, Size = {280, 20}, HTextAlign = "Left", FontStyle = "Bold" })
     table.insert(graphics, { Type = "Label", Text = "Version: " .. PluginInfo.Version, Position = {15, y+40}, Size = {280, 20}, HTextAlign = "Left" })
-    table.insert(graphics, { Type = "Label", Text = "Author: Tomasz Gąsiorowski", Position = {15, y+60}, Size = {280, 20}, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Label", Text = "Author: AGTOM sp. z o.o.", Position = {15, y+60}, Size = {280, 20}, HTextAlign = "Left" })
     y = y + 110
     
     -- Configuration Summary Group
