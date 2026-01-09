@@ -1,0 +1,501 @@
+-- Iiyama Display Control Plugin
+-- Protocol: NEC/Iiyama (0xA6 Header)
+
+PluginInfo = {
+  Name = "Iiyama Display Control",
+  Version = "1.1.0",
+  Id = "IiyamaDisplay",
+  Description = "Control for Iiyama Displays via TCP or RS232",
+  ShowDebug = true,
+  Author = "Tomasz Gąsiorowski"
+}
+
+-- Define Colors
+local Colors = {
+  Green = {0, 255, 0},
+  Red = {255, 0, 0},
+  White = {255, 255, 255},
+  Gray = {200, 200, 200},
+  Black = {0, 0, 0}
+}
+
+function GetColor(props)
+  return Colors.White
+end
+
+function GetPrettyName(props)
+  return "Iiyama Display\rControl " .. props["Connection Type"].Value
+end
+
+-- Pages
+PageNames = {"Control", "Setup"}
+
+function GetPages(props)
+  local pages = {}
+  for _, name in ipairs(PageNames) do
+    table.insert(pages, {name = name})
+  end
+  return pages
+end
+
+function GetProperties()
+  return {
+    { Name = "Connection Type", Type = "enum", Choices = {"TCP", "RS232"}, Value = "TCP" },
+    { Name = "Host", Type = "string", Value = "192.168.1.10" },
+    { Name = "Port", Type = "integer", Min = 1, Max = 65535, Value = 5000 },
+    { Name = "MAC Address", Type = "string", Value = "00:00:00:00:00:00" },
+    { Name = "Baud Rate", Type = "enum", Choices = {"9600", "19200", "38400", "115200"}, Value = "115200" },
+    { Name = "Monitor ID", Type = "integer", Min = 1, Max = 255, Value = 1 },
+    { Name = "Poll Interval (s)", Type = "integer", Min = 0, Max = 60, Value = 5, Description = "0 to disable" },
+    { Name = "Debug Print", Type = "boolean", Value = false }
+  }
+end
+
+function GetControls(props)
+  local ctrls = {}
+  
+  -- System
+  table.insert(ctrls, { Name = "Connection Status", ControlType = "Indicator", IndicatorType = "Status", UserPin = true, PinStyle = "Output" })
+  table.insert(ctrls, { Name = "Online", ControlType = "Indicator", IndicatorType = "Led", UserPin = true, PinStyle = "Output" })
+  table.insert(ctrls, { Name = "Power", ControlType = "Button", ButtonType = "Toggle", UserPin = true, PinStyle = "Both" })
+  table.insert(ctrls, { Name = "Power On", ControlType = "Button", ButtonType = "Trigger", UserPin = true, PinStyle = "Input" })
+  table.insert(ctrls, { Name = "Power Off", ControlType = "Button", ButtonType = "Trigger", UserPin = true, PinStyle = "Input" })
+  table.insert(ctrls, { Name = "Wake on LAN", ControlType = "Button", ButtonType = "Trigger", UserPin = true, PinStyle = "Input" })
+  
+  -- Audio
+  table.insert(ctrls, { Name = "Volume", ControlType = "Knob", ControlUnit = "Integer", Min = 0, Max = 100, UserPin = true, PinStyle = "Both" })
+  table.insert(ctrls, { Name = "Mute", ControlType = "Button", ButtonType = "Toggle", UserPin = true, PinStyle = "Both" })
+  
+  -- Inputs
+  local inputs = {
+    "Input HDMI 1", "Input HDMI 2", "Input HDMI 3",
+    "Input DP", "Input VGA", "Input DVI",
+    "Input USB", "Input OPS", "Input Android"
+  }
+  for _, inp in ipairs(inputs) do
+    table.insert(ctrls, { Name = inp, ControlType = "Button", ButtonType = "Trigger", UserPin = true, PinStyle = "Input" })
+  end
+  table.insert(ctrls, { Name = "Current Input", ControlType = "Indicator", IndicatorType = "Text", UserPin = true, PinStyle = "Output" })
+
+  return ctrls
+end
+
+function GetControlLayout(props)
+  local layout = {}
+  local graphics = {}
+  
+  -- Determine Current Page
+  -- props["page_index"] contains the 1-based index of the current page being rendered
+  local CurrentPage = PageNames[props["page_index"].Value]
+
+  -- --- SETUP PAGE ---
+  if CurrentPage == "Setup" then
+    local y = 10
+    
+    -- Information Group
+    table.insert(graphics, { Type = "GroupBox", Text = "Plugin Information", Position = {5, y}, Size = {300, 100}, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Label", Text = PluginInfo.Name, Position = {15, y+20}, Size = {280, 20}, HTextAlign = "Left", FontStyle = "Bold" })
+    table.insert(graphics, { Type = "Label", Text = "Version: " .. PluginInfo.Version, Position = {15, y+40}, Size = {280, 20}, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Label", Text = "Author: Tomasz Gąsiorowski", Position = {15, y+60}, Size = {280, 20}, HTextAlign = "Left" })
+    y = y + 110
+    
+    -- Configuration Summary Group
+    table.insert(graphics, { Type = "GroupBox", Text = "Current Configuration (Read-Only)", Position = {5, y}, Size = {300, 150}, HTextAlign = "Left" })
+    
+    local conf_y = y + 25
+    local function addConf(label, val)
+      table.insert(graphics, { Type = "Label", Text = label, Position = {15, conf_y}, Size = {100, 20}, HTextAlign = "Left", FontStyle = "Bold", Color = {100, 100, 100} })
+      table.insert(graphics, { Type = "Label", Text = tostring(val), Position = {115, conf_y}, Size = {180, 20}, HTextAlign = "Left" })
+      conf_y = conf_y + 20
+    end
+    
+    addConf("Connection:", props["Connection Type"].Value)
+    if props["Connection Type"].Value == "TCP" then
+      addConf("Host IP:", props["Host"].Value)
+      addConf("Port:", props["Port"].Value)
+    else
+      addConf("Baud Rate:", props["Baud Rate"].Value)
+    end
+    addConf("Monitor ID:", props["Monitor ID"].Value)
+    addConf("MAC Address:", props["MAC Address"].Value)
+    
+    table.insert(graphics, { Type = "Label", Text = "To change settings, use the Properties panel.", Position = {15, conf_y+10}, Size = {280, 30}, FontStyle = "Italic", FontSize = 10, Color = {150, 0, 0} })
+  end
+  
+  -- --- CONTROL PAGE ---
+  if CurrentPage == "Control" then
+    local y = 10
+    
+    -- Status Section
+    table.insert(graphics, { Type = "GroupBox", Text = "Status", Position = {5, y}, Size = {200, 60}, HTextAlign = "Left" })
+    layout["Connection Status"] = { Position = {15, y+25}, Size = {100, 20} }
+    layout["Online"] = { Position = {125, y+25}, Size = {20, 20} }
+    y = y + 70
+    
+    -- Power Section
+    table.insert(graphics, { Type = "GroupBox", Text = "Power", Position = {5, y}, Size = {200, 70}, HTextAlign = "Left" })
+    layout["Power"] = { Position = {15, y+25}, Size = {40, 30} } -- Toggle
+    layout["Power On"] = { Position = {65, y+25}, Size = {40, 30}, Legend = "ON" }
+    layout["Power Off"] = { Position = {110, y+25}, Size = {40, 30}, Legend = "OFF" }
+    layout["Wake on LAN"] = { Position = {155, y+25}, Size = {40, 30}, Legend = "WOL" }
+    y = y + 80
+    
+    -- Audio Section
+    table.insert(graphics, { Type = "GroupBox", Text = "Audio", Position = {5, y}, Size = {200, 70}, HTextAlign = "Left" })
+    layout["Volume"] = { Position = {15, y+25}, Size = {40, 40} }
+    table.insert(graphics, { Type = "Label", Text = "Vol", Position = {15, y+10}, Size = {40, 15}, FontSize = 9 })
+    layout["Mute"] = { Position = {70, y+25}, Size = {40, 40}, Legend = "Mute" }
+    y = y + 80
+    
+    -- Input Section
+    table.insert(graphics, { Type = "GroupBox", Text = "Inputs", Position = {220, 10}, Size = {220, 200}, HTextAlign = "Left" })
+    layout["Current Input"] = { Position = {230, 35}, Size = {200, 20} }
+    
+    local inputs = {
+      "Input HDMI 1", "Input HDMI 2", "Input HDMI 3",
+      "Input DP", "Input VGA", "Input DVI",
+      "Input USB", "Input OPS", "Input Android"
+    }
+    
+    local inp_y = 65
+    local inp_x = 230
+    for i, inp in ipairs(inputs) do
+      layout[inp] = { Position = {inp_x, inp_y}, Size = {60, 30}, Legend = string.gsub(inp, "Input ", "") }
+      inp_x = inp_x + 65
+      if i % 3 == 0 then
+        inp_x = 230
+        inp_y = inp_y + 35
+      end
+    end
+  end
+  
+  return layout, graphics
+end
+
+if Controls then
+  -- --- CONSTANTS ---
+  local HEADER = "\xA6"
+  local CAT = "\x00"
+  local PAGE = "\x00"
+  local CTRL_SET = "\x01"
+  local CTRL_GET = "\x01" -- Often same, but command code differs
+  
+  -- Command Codes (Set / Get)
+  local CMD_POWER_SET = "\x18"
+  local CMD_POWER_GET = "\x19"
+  
+  local CMD_INPUT_SET = "\xAC"
+  local CMD_INPUT_GET = "\xAD"
+  
+  local CMD_VOL_SET = "\x44"
+  local CMD_VOL_GET = "\x45"
+  
+  local CMD_MUTE_SET = "\x8D"
+  local CMD_MUTE_GET = "\x8E"
+  
+  -- Input Codes (HEX)
+  local IN_CODES = {
+    ["HDMI1"] = "\x09",
+    ["HDMI2"] = "\x0A",
+    ["HDMI3"] = "\x0B",
+    ["VGA"] = "\x01",
+    ["DP"] = "\x0D",
+    ["DVI"] = "\x02",
+    ["USB"] = "\x00",
+    ["OPS"] = "\x00",
+    ["ANDROID"] = "\x24"
+  }
+  -- Reverse map for feedback
+  local IN_NAMES = {}
+  for k, v in pairs(IN_CODES) do IN_NAMES[v] = k end
+  
+  -- --- VARIABLES ---
+  local connType = Properties["Connection Type"].Value
+  local host = Properties["Host"].Value
+  local port = Properties["Port"].Value
+  local mac = Properties["MAC Address"].Value
+  local baud = tonumber(Properties["Baud Rate"].Value)
+  local monitorID = Properties["Monitor ID"].Value
+  local pollInterval = Properties["Poll Interval (s)"].Value
+  local debug = Properties["Debug Print"].Value
+  
+  local sock = nil
+  local timer = Timer.New()
+  local rx_buffer = ""
+  
+  -- --- HELPER FUNCTIONS ---
+  function Log(msg)
+    if debug then print("DEBUG: " .. msg) end
+  end
+
+  function HexToString(str)
+    local hex = ""
+    for i = 1, #str do
+      hex = hex .. string.format("%02X ", string.byte(str, i))
+    end
+    return hex
+  end
+  
+  function CalculateChecksum(data)
+    local sum = 0
+    for i = 1, #data do
+      sum = sum ~ string.byte(data, i)
+    end
+    return string.char(sum)
+  end
+  
+  function BuildCommand(cmd_code, val_bytes)
+    local id_char = string.char(monitorID)
+    local data_len = 2 + #val_bytes
+    local len_high = "\x00"
+    local len_low = string.char(data_len)
+    
+    local msg = HEADER .. id_char .. CAT .. PAGE .. len_high .. len_low .. CTRL_SET .. cmd_code .. val_bytes
+    local cs = CalculateChecksum(msg)
+    return msg .. cs
+  end
+
+  function SendData(data)
+    Log("Tx: " .. HexToString(data))
+    if connType == "TCP" then
+      if sock.IsConnected then
+        sock:Write(data)
+      else
+        Log("TCP Not Connected")
+      end
+    else
+      sock:Write(data)
+    end
+  end
+  
+  -- --- POLLING & PARSING ---
+  function Poll()
+    -- Only poll if connected
+    if connType == "TCP" and not sock.IsConnected then return end
+    
+    -- Send Get Commands sequentially
+    -- Note: This is simple polling. For robust polling, use a queue or state machine.
+    -- Sending multiple commands at once might mix responses.
+    -- For this example, we poll one item per tick or just send all and hope TCP handles buffering.
+    
+    -- Get Power
+    local cmd = HEADER .. string.char(monitorID) .. CAT .. PAGE .. "\x00\x02" .. CTRL_GET .. CMD_POWER_GET
+    cmd = cmd .. CalculateChecksum(cmd)
+    SendData(cmd)
+    
+    -- Only poll other status if Power is ON (according to our feedback)
+    -- This prevents error spam if display is offline/sleeping
+    if Controls["Power"].Boolean then
+      -- Get Input
+      cmd = HEADER .. string.char(monitorID) .. CAT .. PAGE .. "\x00\x02" .. CTRL_GET .. CMD_INPUT_GET
+      cmd = cmd .. CalculateChecksum(cmd)
+      SendData(cmd)
+      
+      -- Get Volume
+      cmd = HEADER .. string.char(monitorID) .. CAT .. PAGE .. "\x00\x02" .. CTRL_GET .. CMD_VOL_GET
+      cmd = cmd .. CalculateChecksum(cmd)
+      SendData(cmd)
+      
+      -- Get Mute
+      cmd = HEADER .. string.char(monitorID) .. CAT .. PAGE .. "\x00\x02" .. CTRL_GET .. CMD_MUTE_GET
+      cmd = cmd .. CalculateChecksum(cmd)
+      SendData(cmd)
+    end
+  end
+  
+  function ParseResponse(data)
+    if #data > 0 then Log("Rx Raw: " .. HexToString(data)) end
+    rx_buffer = rx_buffer .. data
+    -- Check for valid frames
+    -- Frame min length: Header+ID+Cat+Page+LenH+LenL+Ctrl+Cmd+... = 8+
+    
+    while #rx_buffer >= 8 do
+      -- Find Header
+      local header_idx = string.find(rx_buffer, HEADER)
+      if not header_idx then
+        rx_buffer = "" -- No header found, clear garbage
+        break
+      end
+      
+      -- Trim garbage before header
+      if header_idx > 1 then
+        rx_buffer = string.sub(rx_buffer, header_idx)
+      end
+      
+      -- Check Length
+      if #rx_buffer < 6 then break end -- Need at least up to LenLow
+      local len = string.byte(rx_buffer, 6)
+      local total_len = 6 + len + 1 -- Header(1)..Len(6) + Data(len) + CS(1)
+      -- Actually, protocol: H(1)+ID(1)+Cat(1)+Pg(1)+LenH(1)+LenL(1) = 6 bytes header prefix.
+      -- Len bytes follow. Then CS.
+      -- So total frame size = 6 + len + 1.
+      
+      if #rx_buffer < total_len then break end -- Wait for more data
+      
+      local frame = string.sub(rx_buffer, 1, total_len)
+      rx_buffer = string.sub(rx_buffer, total_len + 1)
+      
+      -- Verify Checksum
+      local rx_cs = string.sub(frame, -1)
+      local calc_cs = CalculateChecksum(string.sub(frame, 1, -2))
+      
+      if rx_cs == calc_cs then
+        Log("Rx Frame: " .. HexToString(frame))
+        ProcessFrame(frame)
+      else
+        Log("Checksum Error")
+      end
+    end
+  end
+  
+  function ProcessFrame(frame)
+    local cmd = string.sub(frame, 8, 8) -- 8th byte is Command
+    local val = string.sub(frame, 9, -2) -- Value bytes
+    
+    if cmd == CMD_POWER_GET or cmd == CMD_POWER_SET then
+      local state = string.byte(val, 1)
+      Log("Processed Power: " .. state)
+      Controls["Power"].Boolean = (state == 1)
+      if state == 1 then Controls["Power On"].Boolean = true else Controls["Power Off"].Boolean = true end
+      -- Reset triggers momentarily? No, just updating Toggle is enough.
+    
+    elseif cmd == CMD_INPUT_GET or cmd == CMD_INPUT_SET then
+      local code = string.sub(val, 1, 1)
+      local name = IN_NAMES[code]
+      Log("Processed Input: " .. (name or "Unknown"))
+      if name then Controls["Current Input"].String = name end
+      
+    elseif cmd == CMD_VOL_GET or cmd == CMD_VOL_SET then
+      local vol = string.byte(val, 1)
+      Log("Processed Vol: " .. vol)
+      Controls["Volume"].Value = vol
+      
+    elseif cmd == CMD_MUTE_GET or cmd == CMD_MUTE_SET then
+      local state = string.byte(val, 1)
+      Log("Processed Mute: " .. state)
+      Controls["Mute"].Boolean = (state == 1)
+    end
+  end
+
+  -- --- EVENT HANDLERS ---
+  
+  -- Connection
+  if connType == "TCP" then
+    sock = TcpSocket.New()
+    sock.ReadTimeout = 0
+    sock.WriteTimeout = 0
+    sock.ReconnectTimeout = 5
+    
+    sock.EventHandler = function(sock, evt)
+      if evt == TcpSocket.Events.Connected then
+        Controls["Connection Status"].Value = 0 -- OK
+        Controls["Online"].Boolean = true
+        Log("Connected")
+      elseif evt == TcpSocket.Events.Closed or evt == TcpSocket.Events.Error then
+        Controls["Connection Status"].Value = 2 -- Fault
+        Controls["Online"].Boolean = false
+        Log("Disconnected")
+      elseif evt == TcpSocket.Events.Data then
+        ParseResponse(sock:Read(sock.BufferLength))
+      end
+    end
+    sock:Connect(host, port)
+  else
+    sock = SerialPorts[1]
+    sock:Open(baud)
+    sock.EventHandler = function(sock, evt)
+       if evt == SerialPorts.Events.Data then
+         ParseResponse(sock:Read(sock.BufferLength))
+       end
+    end
+  end
+  
+  -- Timer
+  if pollInterval > 0 then
+    timer.EventHandler = Poll
+    timer:Start(pollInterval)
+  end
+  
+  -- Controls
+  Controls["Power"].EventHandler = function()
+    local state = Controls["Power"].Boolean and "\x01" or "\x02"
+    -- If turning ON, use WoL if TCP is disconnected, or send Command
+    if Controls["Power"].Boolean then
+      if connType == "TCP" and not sock.IsConnected then
+        -- Trigger WoL logic
+        Controls["Wake on LAN"].EventHandler()
+      else
+        SendData(BuildCommand(CMD_POWER_SET, "\x01"))
+      end
+      -- Do NOT force feedback true immediately. Wait for Poll/Response.
+      -- Exception: For UI responsiveness, we might want to blink or show 'Turning On'
+      -- But user requested "real feedback". So we rely on Poll.
+      -- However, since Poll clears it if no response, we might see it flip back.
+    else
+      SendData(BuildCommand(CMD_POWER_SET, "\x02"))
+    end
+  end
+  
+  Controls["Power On"].EventHandler = function()
+    if connType == "TCP" and not sock.IsConnected then
+      Controls["Wake on LAN"].EventHandler()
+    else
+      SendData(BuildCommand(CMD_POWER_SET, "\x01"))
+    end
+  end
+  
+  Controls["Power Off"].EventHandler = function()
+    SendData(BuildCommand(CMD_POWER_SET, "\x02"))
+  end
+  
+  Controls["Wake on LAN"].EventHandler = function()
+    local udp = UdpSocket.New()
+    udp:Open()
+    local mac_clean = string.gsub(mac, "[:%-]", "")
+    if #mac_clean == 12 then
+      local magic = string.rep("\xFF", 6)
+      local mb = ""
+      for i=1,12,2 do mb = mb .. string.char(tonumber(string.sub(mac_clean,i,i+1),16)) end
+      magic = magic .. string.rep(mb, 16)
+      
+      Log("WoL Tx to " .. host .. ":9 | MAC: " .. mac)
+      Log("WoL Magic Packet: " .. HexToString(magic))
+      
+      udp:Send(host, 9, magic)
+    else
+      Log("WoL Error: Invalid MAC Address " .. mac)
+    end
+    udp:Close()
+  end
+  
+  Controls["Volume"].EventHandler = function()
+    SendData(BuildCommand(CMD_VOL_SET, string.char(Controls["Volume"].Value)))
+  end
+  
+  Controls["Mute"].EventHandler = function()
+    local state = Controls["Mute"].Boolean and "\x01" or "\x02"
+    SendData(BuildCommand(CMD_MUTE_SET, state))
+  end
+  
+  -- Input Handlers
+  local input_map = {
+    ["Input HDMI 1"] = IN_CODES["HDMI1"],
+    ["Input HDMI 2"] = IN_CODES["HDMI2"],
+    ["Input HDMI 3"] = IN_CODES["HDMI3"],
+    ["Input VGA"] = IN_CODES["VGA"],
+    ["Input DP"] = IN_CODES["DP"],
+    ["Input DVI"] = IN_CODES["DVI"],
+    ["Input USB"] = IN_CODES["USB"],
+    ["Input OPS"] = IN_CODES["OPS"],
+    ["Input Android"] = IN_CODES["ANDROID"]
+  }
+  
+  for name, code in pairs(input_map) do
+    if Controls[name] then
+      Controls[name].EventHandler = function()
+        SendData(BuildCommand(CMD_INPUT_SET, code))
+      end
+    end
+  end
+
+end
